@@ -24,6 +24,13 @@ connect = {
 }
 
 
+def pp(data: dict):
+    """pretty print 格式化打印json"""
+    ppdata = json.dumps(data, indent=4, separators=(',', ':'), ensure_ascii=False)
+    print(ppdata)
+    return ppdata
+
+
 def timer(function):
     """
     装饰器函数timer
@@ -150,6 +157,7 @@ class Wechat:
         self.getToken = self.token_response.json().get('access_token')
         if self.getToken:
             print("token获取成功")
+            print(self.getToken)
         else:
             print("token获取失败，请检查:", self.token_response.json())
 
@@ -164,12 +172,6 @@ class Wechat:
         self.update_staff_url = "https://qyapi.weixin.qq.com/cgi-bin/user/update?access_token=%s"  # post
 
     """公用函数"""
-
-    def pp(self, data: dict):
-        """pretty print 格式化打印json"""
-        ppdata = json.dumps(data, indent=4, separators=(',', ':'), ensure_ascii=False)
-        print(ppdata)
-        return ppdata
 
     def printResult(self, operation, data, response):
         """打印操作结果：根据返回Response类中的errcode值判断操作是否成功，成功则返回操作名+成功+数据内容，否则返回Response类及数据内容"""
@@ -199,7 +201,7 @@ class Wechat:
         print(dresponse)
         return dresponse
 
-    def delinfo(self, department_id, is_user=0):
+    def delinfo(self, department_id, is_user=0) -> bool:
         if is_user:
             operation = "人员删除"
             rget = requests.get(url=self.del_staff_url % (self.getToken, department_id))  # 返回Response类
@@ -209,7 +211,7 @@ class Wechat:
         result = self.printResult(operation, department_id, rget)
         return result
 
-    def createinfo(self, info_data: dict, is_user=0):
+    def createinfo(self, info_data: dict, is_user=0) -> bool:
         cdata = json.dumps(info_data, ensure_ascii=False).encode("utf-8")  # 将python dict转为json并以utf-8编码
         if is_user:
             operation = "人员创建"
@@ -220,7 +222,7 @@ class Wechat:
         result = self.printResult(operation, info_data, rpost)  # 打印操作结果
         return result
 
-    def updateinfo(self, new_data: dict, is_user):
+    def updateinfo(self, new_data: dict, is_user) -> bool:
         cdata = json.dumps(new_data, ensure_ascii=False).encode("utf-8")  # 将python dict转为json并以utf-8编码
         if is_user:
             operation = "人员修改"
@@ -235,8 +237,6 @@ class Wechat:
         # 操作方法：
         # 在kettl中向中间表中推送空数据，则中间表中的数据config字段会被标记为3，再运行本程序，会将所有数据从微信中删除
         pass
-
-    """人员方法:"""
 
 
 @timer
@@ -275,30 +275,64 @@ def handleDepartment(wechat, db):
     db.connClose()
 
 
+def handleStaff(wechat, db):
+    query_sql_for_createupdate = """
+            SELECT GH,XM,XB,LXDH,BGDH,DZXX,SZKS,OD,ZW,IS_LEADER,TO_INVITE,config 
+            FROM WECHAT_PERSONNEL_TEACHER WHERE STATUS=1  AND  GH='2017800245' --SZKS LIKE '402___'
+    """
+    query_sql_for_del = """SELECT GH FROM WECHAT_PERSONNEL_TEACHER WHERE STATUS=1 AND CONFIG=3 ORDER BY GH"""
+    update_sql = """UPDATE WECHAT_PERSONNEL_TEACHER SET STATUS=0 WHERE GH='%s'"""
+    delete_sql = """DELETE FROM WECHAT_PERSONNEL_TEACHER WHERE GH='%s'"""
+
+    data_title = ['userid', 'name', 'gender', 'mobile', 'telephone', 'email', 'department', 'order', 'position',
+                  'is_leader_in_dept', 'to_invite']
+    createupdate_date = db.query(query_sql_for_createupdate)
+    del_data = db.query(query_sql_for_del)
+
+    for staff in del_data:
+        id = staff[0]
+        success = wechat.delinfo(id, 1)  # 删除微信中的人员
+        if success:
+            db.delete(delete_sql % id)  # 删除中间表数据
+
+    for staff in createupdate_date:
+        data = dict(zip(data_title, staff))  # 组织dict数据
+        if data['to_invite']:
+            data['to_invite'] = True
+        else:
+            data['to_invite'] = False
+        if staff[-1] == 2:
+            success = wechat.updateinfo(data, 1)  # 更新人员
+            if not success:
+                success = wechat.createinfo(data, 1)
+        elif staff[-1] == 1:
+            success = wechat.createinfo(data, 1)  # 创建人员
+
+        else:
+            success = False
+
+        if success:
+            db.update(update_sql % staff[0])  # 将中间表status字段置0
+
+    db.connClose()
+
+
 if __name__ == '__main__':
     jisu = Wechat()
-    # dbm = Database('oracle', 'dbm/comsys123@dbm')
+    dbm = Database('oracle', 'dbm/comsys123@dbm')
 
     # handleDepartment(jisu, dbm)
-    # jisu.getinfo('chenbowen', 1)
-    # jisu.getinfo()
-    # jisu.delinfo('2010800037', 1)
+    # handleStaff(jisu, dbm)
 
     data = {
-        "userid": '2010800037',
-        "name": '杨慧',
-        "mobile": '15567778998',
-        "department": 1,  # 部门
-        "position": "",  # 职务
-        "gender": "2",  # 性别
-        # "is_leader_in_dept":0,  # 是否为部门领导
-        "to_invite": False  # 是否发送邀请
+        "userid": "2010800000",
+        "name": "测试",
+        "mobile": "13353147137",
+        "department": "316002",
+        "order": "11",
+        "position": "职员",
+        "gender": "1",
+        "is_leader_in_dept": 0,
+        "to_invite": False
     }
-
-    # jisu.createStaff(data)
     jisu.createinfo(data, 1)
-    jisu.getinfo('2010800037', 1)
-
-# kettle中间表
-# handlestaff
-# log
