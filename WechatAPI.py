@@ -241,13 +241,27 @@ class Wechat:
 
 @timer
 def handleDepartment(wechat, db):
+    """
+    @param wechat:  自定义类Wechat，用于确定企业微信身份
+    @param db:  自定义类Database， 用于确定要连接的数据库
+
+    中间表字段控制：
+        config：比对数据源，新增置1，修改置2，删除置3
+        status：比对数据源，有新增、修改和删除处理则置1，在对企业微信进行处理之后置0
+
+    函数功能：
+         - 在中间表中查找需要处理的部门数据
+         - 遍历需要处理的数据，在企业微信中处理掉，处理后修改中间表数据 将状态置0
+         - 关闭数据库连接（数据库连接在DataBase类中完成，在本函数处理结束后关闭）
+
+    """
     query_sql_for_createupdate = """
             SELECT DWH id,999999-DWH od, (CASE LSDWH WHEN '0' THEN '1' ELSE LSDWH END) parentid,DWMC name,DWJP name_en, config 
             FROM WECHAT_PERSONNEL_DEPARTMENT 
             WHERE STATUS=1 AND DWH<>0 order by LSDWH,DWH
-    """
-    query_sql_for_del = """SELECT DWH FROM WECHAT_PERSONNEL_DEPARTMENT WHERE STATUS=1 AND CONFIG=3 ORDER BY LSDWH DESC"""
-    update_sql = """UPDATE WECHAT_PERSONNEL_DEPARTMENT SET STATUS=0 WHERE DWH='%s'"""
+    """  # 在中间表中查询 有需要变更的部门信息
+    query_sql_for_del = """SELECT DWH FROM WECHAT_PERSONNEL_DEPARTMENT WHERE STATUS=1 AND CONFIG=3 ORDER BY LSDWH DESC"""  # 查询需要删除的部门信息CONFIG=3
+    update_sql = """UPDATE WECHAT_PERSONNEL_DEPARTMENT SET STATUS=0 WHERE DWH='%s'"""  # 对中间表已处理的数据置0 STATUS=0
     delete_sql = """DELETE FROM WECHAT_PERSONNEL_DEPARTMENT WHERE DWH='%s'"""
 
     data_title = ['id', 'order', 'parentid', 'name', 'name_en']
@@ -278,7 +292,7 @@ def handleDepartment(wechat, db):
 def handleStaff(wechat, db):
     query_sql_for_createupdate = """
             SELECT GH,XM,XB,LXDH,BGDH,DZXX,SZKS,OD,ZW,IS_LEADER,TO_INVITE,config 
-            FROM WECHAT_PERSONNEL_TEACHER WHERE STATUS=1  AND  GH='2017800245' --SZKS LIKE '402___'
+            FROM WECHAT_PERSONNEL_TEACHER WHERE STATUS=1  AND  SZKS LIKE '402___'
     """
     query_sql_for_del = """SELECT GH FROM WECHAT_PERSONNEL_TEACHER WHERE STATUS=1 AND CONFIG=3 ORDER BY GH"""
     update_sql = """UPDATE WECHAT_PERSONNEL_TEACHER SET STATUS=0 WHERE GH='%s'"""
@@ -322,17 +336,18 @@ if __name__ == '__main__':
     dbm = Database('oracle', 'dbm/comsys123@dbm')
 
     # handleDepartment(jisu, dbm)
-    # handleStaff(jisu, dbm)
-
-    data = {
-        "userid": "2010800000",
-        "name": "测试",
-        "mobile": "13353147137",
-        "department": "316002",
-        "order": "11",
-        "position": "职员",
-        "gender": "1",
-        "is_leader_in_dept": 0,
-        "to_invite": False
-    }
-    jisu.createinfo(data, 1)
+    handleStaff(jisu, dbm)
+    #
+    # data = {
+    #     "userid": "2009800023",
+    #     "name": "王尊",
+    #     "mobile": "18686669798",
+    #     "department": "316002",
+    #     "order": "11",
+    #     "position": "职员",
+    #     "gender": "1",
+    #     "is_leader_in_dept": 0,
+    #     "to_invite": False  # 微信邀请
+    # }
+    #
+    # jisu.createinfo(data, 1)
