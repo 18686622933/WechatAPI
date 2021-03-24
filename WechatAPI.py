@@ -2,16 +2,30 @@
 # -*- coding:utf-8 -*-
 
 
+"""
+更新说明：
+
+
+更换部门和人员的同步方式为全量替换
+方法：
+先上传含有准确信息的CSV到企业微信，并返回上传文件的media_id，
+再根据返回的media_id调用企业微信接口完成对已有数据的全量覆盖，
+
+其中要注意：
+文件中不存在、通讯录中存在的部门，当部门下仍有成员或子部门时，暂时不会删除，当下次导入成员把人从部门移出后自动删除
+"""
+
+
 import requests
 import json
 import cx_Oracle
 import pymysql
 import pymssql
 import sqlite3
-import datetime
 import time
+import pandas
 
-# test data
+""" db connect info """
 connect = {
     '教务': {'dbtype': 'oracle', 'account': 'zfxfzb/zfsoft_hqwy@orcl', 'is_sysdba': 0},
     '学工': {'dbtype': 'sqlserver', 'account': 'lx/Hqwy@edu2016/192.168.2.78', 'is_sysdba': 0},
@@ -23,12 +37,27 @@ connect = {
     '数据湖': {'dbtype': 'oracle', 'account': 'dbm/comsys123/dbm', 'is_sysdba': 0},
 }
 
+""" base function """
+
 
 def pp(data: dict):
     """pretty print 格式化打印json"""
     ppdata = json.dumps(data, indent=4, separators=(',', ':'), ensure_ascii=False)
     print(ppdata)
     return ppdata
+
+
+def toCSV(data, columns, filename):
+    """数据库fetchall()结果转CSV"""
+    df = pandas.DataFrame([list(i) for i in data], columns=columns)
+    # print(df)
+    try:
+        df.to_csv(filename, index=False, encoding='utf_8_sig')  # 不显示行号，utf8编码
+        print("数据已输出至%s" % filename)
+        return filename
+    except:
+        print("输出到CSV出错")
+        return None
 
 
 def timer(function):
@@ -46,6 +75,9 @@ def timer(function):
         return res
 
     return wrapper
+
+
+"""数据库类，直接使用函数完成增删改查"""
 
 
 class Database:
@@ -129,7 +161,8 @@ class Database:
         else:
             return False
 
-    def updata2select(self, updata_sql) -> tuple:
+    @staticmethod
+    def updata2select(updata_sql) -> tuple:
         """将uptdata语句转换为select语句，用于修改后的查询"""
         words = updata_sql.split()
         upper_words = list(map(lambda x: x.upper(), words))
@@ -137,15 +170,15 @@ class Database:
         if 'UPDATE' in upper_words and 'SET' in upper_words and 'WHERE' in upper_words:
             table = words[upper_words.index('UPDATE') + 1]
             conditional = ' '.join(words[upper_words.index('WHERE') + 1:])
-            set = words[upper_words.index('SET') + 1]
-            key = set.split('=')[0]
-            value = set.split('=')[1].replace('\'', '')
+            set_info = words[upper_words.index('SET') + 1]
+            key = set_info.split('=')[0]
+            value = set_info.split('=')[1].replace('\'', '')
 
-        else:
-            return None
+            select_sql = "SELECT %s FROM %s WHERE %s" % (key, table, conditional)
+            return select_sql, value
 
-        select_sql = "SELECT %s FROM %s WHERE %s" % (key, table, conditional)
-        return select_sql, value
+
+"""企业微信类，直接使用函数完成对应请求"""
 
 
 class Wechat:
@@ -156,8 +189,7 @@ class Wechat:
         self.token_response = requests.get(url=self.token_url % (self.corpid, self.corpsecret))
         self.getToken = self.token_response.json().get('access_token')
         if self.getToken:
-            print("token获取成功")
-            print(self.getToken)
+            print("token获取成功:", self.getToken)
         else:
             print("token获取失败，请检查:", self.token_response.json())
 
@@ -171,9 +203,16 @@ class Wechat:
         self.create_staff_url = "https://qyapi.weixin.qq.com/cgi-bin/user/create?access_token=%s"  # post
         self.update_staff_url = "https://qyapi.weixin.qq.com/cgi-bin/user/update?access_token=%s"  # post
 
+        self.cover_deparment_url = "https://qyapi.weixin.qq.com/cgi-bin/batch/replaceparty?access_token=%s"  # post
+        self.cover_staff_url = "https://qyapi.weixin.qq.com/cgi-bin/batch/replaceuser?access_token=%s"  # post
+
+        self.upload_url = "https://qyapi.weixin.qq.com/cgi-bin/media/upload?access_token=%s&type=file"  # post
+        self.get_media_url = "https://qyapi.weixin.qq.com/cgi-bin/media/get?access_token=%s&media_id=%s"  # get
+
     """公用函数"""
 
-    def printResult(self, operation, data, response):
+    @staticmethod
+    def printResult(operation, data, response):
         """打印操作结果：根据返回Response类中的errcode值判断操作是否成功，成功则返回操作名+成功+数据内容，否则返回Response类及数据内容"""
         dresponse = response.json()
         if dresponse.get('errcode') == 0:
@@ -222,7 +261,7 @@ class Wechat:
         result = self.printResult(operation, info_data, rpost)  # 打印操作结果
         return result
 
-    def updateinfo(self, new_data: dict, is_user) -> bool:
+    def updateinfo(self, new_data: dict, is_user=0) -> bool:
         cdata = json.dumps(new_data, ensure_ascii=False).encode("utf-8")  # 将python dict转为json并以utf-8编码
         if is_user:
             operation = "人员修改"
@@ -238,8 +277,39 @@ class Wechat:
         # 在kettl中向中间表中推送空数据，则中间表中的数据config字段会被标记为3，再运行本程序，会将所有数据从微信中删除
         pass
 
+    def upload(self, file_name):
+        """使用post请求上传临时文件到企业微信，返回文件的media_id"""
+        files = {'file': open(file_name, 'rb')}
 
-@timer
+        response = requests.post(self.upload_url % self.getToken, files=files)
+        js = response.json()
+        media_id = js['media_id']
+        print("%s上传成功 media_id：%s" % (file_name, media_id))
+        return media_id
+
+    def coverAll(self, media_id, is_user=0):
+        """"""
+        body_dep = json.dumps({"media_id": media_id, "callback": {"url": "", "token": "", "encodingaeskey": ""}})
+        body_staff = json.dumps(
+            {"media_id": media_id, "to_invite": False, "callback": {"url": "", "token": "", "encodingaeskey": ""}})
+
+        if is_user:
+            job = "人员"
+            response = requests.post(self.cover_staff_url % self.getToken, data=body_staff)
+        else:
+            job = "部门"
+            response = requests.post(self.cover_deparment_url % self.getToken, data=body_dep)
+
+        js = response.json()
+        if js['errcode'] == 0:
+            print("%s覆盖成功 jobid：%s" % (job, js['jobid']))
+        else:
+            print(js)
+
+        return js
+
+
+# 暂时作废，用于逐个处理部门
 def handleDepartment(wechat, db):
     """
     @param wechat:  自定义类Wechat，用于确定企业微信身份
@@ -256,13 +326,15 @@ def handleDepartment(wechat, db):
 
     """
     query_sql_for_createupdate = """
-            SELECT DWH id,999999-DWH od, (CASE LSDWH WHEN '0' THEN '1' ELSE LSDWH END) parentid,DWMC name,DWJP name_en, config 
+            SELECT id,od, parentid,name,name_en, config 
             FROM WECHAT_PERSONNEL_DEPARTMENT 
-            WHERE STATUS=1 AND DWH<>0 order by LSDWH,DWH
+            WHERE STATUS=1 order by parentid,id
     """  # 在中间表中查询 有需要变更的部门信息
-    query_sql_for_del = """SELECT DWH FROM WECHAT_PERSONNEL_DEPARTMENT WHERE STATUS=1 AND CONFIG=3 ORDER BY LSDWH DESC"""  # 查询需要删除的部门信息CONFIG=3
-    update_sql = """UPDATE WECHAT_PERSONNEL_DEPARTMENT SET STATUS=0 WHERE DWH='%s'"""  # 对中间表已处理的数据置0 STATUS=0
-    delete_sql = """DELETE FROM WECHAT_PERSONNEL_DEPARTMENT WHERE DWH='%s'"""
+    query_sql_for_del = """SELECT id FROM WECHAT_PERSONNEL_DEPARTMENT 
+                            WHERE STATUS=1 AND CONFIG=3 ORDER BY parentid DESC"""  # 查询需要删除的部门信息CONFIG=3
+
+    update_sql = """UPDATE WECHAT_PERSONNEL_DEPARTMENT SET STATUS=0 WHERE id='%s'"""  # 对中间表已处理的数据置0 STATUS=0
+    delete_sql = """DELETE FROM WECHAT_PERSONNEL_DEPARTMENT WHERE id='%s'"""
 
     data_title = ['id', 'order', 'parentid', 'name', 'name_en']
     createupdate_date = db.query(query_sql_for_createupdate)
@@ -289,12 +361,14 @@ def handleDepartment(wechat, db):
     db.connClose()
 
 
+# 暂时作废，用于逐个处理人员
 def handleStaff(wechat, db):
     query_sql_for_createupdate = """
             SELECT GH,XM,XB,LXDH,BGDH,DZXX,SZKS,OD,ZW,IS_LEADER,TO_INVITE,config 
             FROM WECHAT_PERSONNEL_TEACHER WHERE STATUS=1  AND  SZKS LIKE '402___'
     """
-    query_sql_for_del = """SELECT GH FROM WECHAT_PERSONNEL_TEACHER WHERE STATUS=1 AND CONFIG=3 ORDER BY GH"""
+    query_sql_for_del = """SELECT GH FROM WECHAT_PERSONNEL_TEACHER 
+                        WHERE STATUS=1 AND CONFIG=3 AND SZKS LIKE '402___' ORDER BY GH"""
     update_sql = """UPDATE WECHAT_PERSONNEL_TEACHER SET STATUS=0 WHERE GH='%s'"""
     delete_sql = """DELETE FROM WECHAT_PERSONNEL_TEACHER WHERE GH='%s'"""
 
@@ -312,7 +386,7 @@ def handleStaff(wechat, db):
     for staff in createupdate_date:
         data = dict(zip(data_title, staff))  # 组织dict数据
         if data['to_invite']:
-            data['to_invite'] = True
+            data['to_invite'] = True  # 是否发送邀请
         else:
             data['to_invite'] = False
         if staff[-1] == 2:
@@ -331,18 +405,46 @@ def handleStaff(wechat, db):
     db.connClose()
 
 
+"""运行函数"""
+
+
+@timer
+def run(wechat: Wechat, db: Database):
+    """部门数据"""
+    dep_file_name = "department" + ".csv"
+    dep_list = ['部门名称', '部门ID', '父部门ID', '排序']
+    dep_data = db.query(
+        """SELECT DWMC NAME,DWH ID, (CASE LSDWH WHEN '0' THEN '1' ELSE LSDWH END) parentid, 999999-DWH OD 
+           FROM V_DLAKE_DEPARTMENT_SIMP WHERE  DWYXBS ='0' AND DWH<>'0' order by dwh """)  # get data from db
+    toCSV(dep_data, dep_list, dep_file_name)  # 输出到CSV
+    department_media_id = wechat.upload(dep_file_name)  # upload data and get media_id=
+    wechat.coverAll(department_media_id)  # cover all
+
+    """教师数据"""
+    tch_file_name = "teacher" + ".csv"
+    tch_list = ["姓名", "帐号", "手机号", "邮箱", "所在部门", "职位", "性别", "是否部门内领导", "排序", "别名", "地址", "座机", "禁用",
+                "禁用项说明：(0-启用;1-禁用)"]
+    tch_data = db.query("""SELECT XM,GH,LXDH,DZXX,SZKS_SIMP,ZW,XBM, (CASE WHEN XH='01' THEN 1 ELSE 0 END) IS_LEADER,
+                                9999999-XH OD,'' BM,'' DZ,BGDH,0 JY, '' SM FROM V_DLAKE_TEACHER_SIMP 
+                            WHERE GZZT='在职' AND SUBSTR(GH,0,4)<> '9999' 
+                             AND JZGLBM  NOT IN ('兼职教师') AND (SZKS_SIMP LIKE '402%' ) """)
+    toCSV(tch_data, tch_list, tch_file_name)  # 输出到CSV
+    teacher_media_id = wechat.upload(tch_file_name)
+    wechat.coverAll(teacher_media_id, is_user=1)
+
+
 if __name__ == '__main__':
     jisu = Wechat()
     dbm = Database('oracle', 'dbm/comsys123@dbm')
 
     # handleDepartment(jisu, dbm)
-    handleStaff(jisu, dbm)
+    # handleStaff(jisu, dbm)
     #
     # data = {
     #     "userid": "2009800023",
     #     "name": "王尊",
     #     "mobile": "18686669798",
-    #     "department": "316002",
+    #     "department": "316999",
     #     "order": "11",
     #     "position": "职员",
     #     "gender": "1",
@@ -350,4 +452,7 @@ if __name__ == '__main__':
     #     "to_invite": False  # 微信邀请
     # }
     #
-    # jisu.createinfo(data, 1)
+    # res = jisu.createinfo(data, 1)
+    # print(res)
+
+    run(jisu, dbm)
